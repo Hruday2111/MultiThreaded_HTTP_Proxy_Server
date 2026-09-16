@@ -4,6 +4,92 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <pthread.h>
+
+void *handle_client(void *arg){
+    sleep(10);
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    printf("Client connected!\n");
+
+    // Read the request in chunks until the complete HTTP header arrives.
+    // One recv() call is not guaranteed to contain the complete request.
+    size_t buffer_capacity = 4096;
+    size_t total_bytes_read = 0;
+    char *buffer = malloc(buffer_capacity);
+    int headers_complete = 0;
+
+    if (buffer == NULL){
+        perror("malloc failed");
+        close(client_fd);
+        return NULL;
+    }
+
+    while (!headers_complete){
+        if (total_bytes_read + 1 >= buffer_capacity){
+            size_t new_capacity = buffer_capacity * 2;
+            char *larger_buffer = realloc(buffer, new_capacity);
+
+            if (larger_buffer == NULL){
+                perror("realloc failed");
+                free(buffer);
+                buffer = NULL;
+                break;
+            }
+
+            buffer = larger_buffer;
+            buffer_capacity = new_capacity;
+        }
+
+        ssize_t bytes_read = recv(
+            client_fd,
+            buffer + total_bytes_read,
+            buffer_capacity - total_bytes_read - 1,
+            0
+        );
+
+        if (bytes_read < 0){
+            perror("recv failed");
+            break;
+        }
+
+        if (bytes_read == 0){
+            printf("Client disconnected before the complete HTTP header arrived.\n");
+            break;
+        }
+
+        total_bytes_read += (size_t) bytes_read;
+        buffer[total_bytes_read] = '\0';
+
+        if (strstr(buffer, "\r\n\r\n") != NULL){
+            headers_complete = 1;
+        }
+    }
+
+    if (buffer != NULL && headers_complete){
+        printf("----- Received %zu bytes -----\n%s\n-----------------------------\n",
+               total_bytes_read, buffer);
+
+        // Send back a fixed, hardcoded HTTP response.
+        const char *response =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 13\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "Hello, world!";
+
+        if (send(client_fd, response, strlen(response), 0) < 0){
+            perror("send failed");
+        }
+    }
+
+    free(buffer);
+    close(client_fd);
+    printf("Connection closed. Waiting for the next client...\n");
+    return NULL;
+}
 
 int main(int argc, char *argv[]){
     if (argc != 2){
@@ -44,92 +130,32 @@ int main(int argc, char *argv[]){
     printf("Listening on port %d... waiting for connections\n", port);
 
     // 4. Keep accepting clients. accept() blocks until a client connects.
-    //    Each client is handled and closed before accepting the next one.
+    //    Each client is handled by its own detached thread.
     while (1){
         int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd < 0){
             perror("accept failed");
             continue;
         }
-        printf("Client connected!\n");
 
-        // 5. Read the request in chunks until the complete HTTP header arrives.
-        //    One recv() call is not guaranteed to contain the complete request.
-        size_t buffer_capacity = 4096;
-        size_t total_bytes_read = 0;
-        char *buffer = malloc(buffer_capacity);
-        int headers_complete = 0;
-
-        if (buffer == NULL){
+        int *client_arg = malloc(sizeof(*client_arg));
+        if (client_arg == NULL){
             perror("malloc failed");
             close(client_fd);
             continue;
         }
+        *client_arg = client_fd;
 
-        while (!headers_complete){
-            if (total_bytes_read + 1 >= buffer_capacity){
-                size_t new_capacity = buffer_capacity * 2;
-                char *larger_buffer = realloc(buffer, new_capacity);
-
-                if (larger_buffer == NULL){
-                    perror("realloc failed");
-                    free(buffer);
-                    buffer = NULL;
-                    break;
-                }
-
-                buffer = larger_buffer;
-                buffer_capacity = new_capacity;
-            }
-
-            ssize_t bytes_read = recv(
-                client_fd,
-                buffer + total_bytes_read,
-                buffer_capacity - total_bytes_read - 1,
-                0
-            );
-
-            if (bytes_read < 0){
-                perror("recv failed");
-                break;
-            }
-
-            if (bytes_read == 0){
-                printf("Client disconnected before the complete HTTP header arrived.\n");
-                break;
-            }
-
-            total_bytes_read += (size_t) bytes_read;
-            buffer[total_bytes_read] = '\0';
-
-            if (strstr(buffer, "\r\n\r\n") != NULL){
-                headers_complete = 1;
-            }
+        pthread_t tid;
+        int thread_result = pthread_create(&tid, NULL, handle_client, client_arg);
+        if (thread_result != 0){
+            fprintf(stderr, "pthread_create failed: %s\n", strerror(thread_result));
+            free(client_arg);
+            close(client_fd);
+            continue;
         }
 
-        if (buffer != NULL && headers_complete){
-            printf("----- Received %zu bytes -----\n%s\n-----------------------------\n",
-                   total_bytes_read, buffer);
-
-            // 6. Send back a fixed, hardcoded HTTP response
-            const char *response =
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 13\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                "Hello, world!";
-
-            if (send(client_fd, response, strlen(response), 0) < 0){
-                perror("send failed");
-            }
-        }
-
-        free(buffer);
-
-        // 7. Close this client, then return to accept() for another client.
-        close(client_fd);
-        printf("Connection closed. Waiting for the next client...\n");
+        pthread_detach(tid);
     }
 
     // The loop currently runs until the process is stopped.
