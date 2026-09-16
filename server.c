@@ -5,8 +5,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
+int main(int argc, char *argv[]){
+    if (argc != 2){
         printf("Usage: %s <port>\n", argv[0]);
         exit(1);
     }
@@ -14,7 +14,7 @@ int main(int argc, char *argv[]) {
 
     // 1. Create a socket -- this is just asking the OS for a "phone line" handle
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
+    if (server_fd < 0){
         perror("socket failed");
         exit(1);
     }
@@ -30,45 +30,109 @@ int main(int argc, char *argv[]) {
     address.sin_addr.s_addr = INADDR_ANY;  // accept on any local network interface
     address.sin_port = htons(port);        // htons = convert port into network byte order
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0){
         perror("bind failed");
         exit(1);
     }
 
     // 3. Start listening -- 5 is how many pending connections can queue up
-    if (listen(server_fd, 5) < 0) {
+    if (listen(server_fd, 5) < 0){
         perror("listen failed");
         exit(1);
     }
 
-    printf("Listening on port %d... waiting for ONE connection\n", port);
+    printf("Listening on port %d... waiting for connections\n", port);
 
-    // 4. Accept a connection -- this line BLOCKS (freezes) until a client connects
-    int client_fd = accept(server_fd, NULL, NULL);
-    if (client_fd < 0) {
-        perror("accept failed");
-        exit(1);
+    // 4. Keep accepting clients. accept() blocks until a client connects.
+    //    Each client is handled and closed before accepting the next one.
+    while (1){
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0){
+            perror("accept failed");
+            continue;
+        }
+        printf("Client connected!\n");
+
+        // 5. Read the request in chunks until the complete HTTP header arrives.
+        //    One recv() call is not guaranteed to contain the complete request.
+        size_t buffer_capacity = 4096;
+        size_t total_bytes_read = 0;
+        char *buffer = malloc(buffer_capacity);
+        int headers_complete = 0;
+
+        if (buffer == NULL){
+            perror("malloc failed");
+            close(client_fd);
+            continue;
+        }
+
+        while (!headers_complete){
+            if (total_bytes_read + 1 >= buffer_capacity){
+                size_t new_capacity = buffer_capacity * 2;
+                char *larger_buffer = realloc(buffer, new_capacity);
+
+                if (larger_buffer == NULL){
+                    perror("realloc failed");
+                    free(buffer);
+                    buffer = NULL;
+                    break;
+                }
+
+                buffer = larger_buffer;
+                buffer_capacity = new_capacity;
+            }
+
+            ssize_t bytes_read = recv(
+                client_fd,
+                buffer + total_bytes_read,
+                buffer_capacity - total_bytes_read - 1,
+                0
+            );
+
+            if (bytes_read < 0){
+                perror("recv failed");
+                break;
+            }
+
+            if (bytes_read == 0){
+                printf("Client disconnected before the complete HTTP header arrived.\n");
+                break;
+            }
+
+            total_bytes_read += (size_t) bytes_read;
+            buffer[total_bytes_read] = '\0';
+
+            if (strstr(buffer, "\r\n\r\n") != NULL){
+                headers_complete = 1;
+            }
+        }
+
+        if (buffer != NULL && headers_complete){
+            printf("----- Received %zu bytes -----\n%s\n-----------------------------\n",
+                   total_bytes_read, buffer);
+
+            // 6. Send back a fixed, hardcoded HTTP response
+            const char *response =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 13\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "Hello, world!";
+
+            if (send(client_fd, response, strlen(response), 0) < 0){
+                perror("send failed");
+            }
+        }
+
+        free(buffer);
+
+        // 7. Close this client, then return to accept() for another client.
+        close(client_fd);
+        printf("Connection closed. Waiting for the next client...\n");
     }
-    printf("Client connected!\n");
 
-    // 5. Read whatever the client sent us (their raw HTTP request text)
-    char buffer[4096] = {0};
-    int bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-    printf("----- Received %d bytes -----\n%s\n-----------------------------\n", bytes_read, buffer);
-
-    // 6. Send back a fixed, hardcoded HTTP response (not the real website's content yet)
-    char *response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 13\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "Hello, world!";
-    send(client_fd, response, strlen(response), 0);
-
-    // 7. Clean up both sockets
-    close(client_fd);
+    // The loop currently runs until the process is stopped.
     close(server_fd);
-    printf("Done. Connection closed.\n");
     return 0;
 }
