@@ -5,13 +5,23 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <semaphore.h>
+
+sem_t client_limit;
+// Maximum number of clients allowed to run concurrently.
+static const unsigned int MAX_CONCURRENT_CLIENTS = 3;
 
 void *handle_client(void *arg){
-    sleep(10);
+    if(sem_wait(&client_limit) < 0){
+        perror("sem_wait failed");
+        return NULL;
+    }
+
     int client_fd = *(int *)arg;
     free(arg);
 
     printf("Client connected!\n");
+    sleep(5);
 
     // Read the request in chunks until the complete HTTP header arrives.
     // One recv() call is not guaranteed to contain the complete request.
@@ -20,18 +30,19 @@ void *handle_client(void *arg){
     char *buffer = malloc(buffer_capacity);
     int headers_complete = 0;
 
-    if (buffer == NULL){
+    if(buffer == NULL){
         perror("malloc failed");
         close(client_fd);
+        sem_post(&client_limit);
         return NULL;
     }
 
     while (!headers_complete){
-        if (total_bytes_read + 1 >= buffer_capacity){
+        if(total_bytes_read + 1 >= buffer_capacity){
             size_t new_capacity = buffer_capacity * 2;
             char *larger_buffer = realloc(buffer, new_capacity);
 
-            if (larger_buffer == NULL){
+            if(larger_buffer == NULL){
                 perror("realloc failed");
                 free(buffer);
                 buffer = NULL;
@@ -49,12 +60,12 @@ void *handle_client(void *arg){
             0
         );
 
-        if (bytes_read < 0){
+        if(bytes_read < 0){
             perror("recv failed");
             break;
         }
 
-        if (bytes_read == 0){
+        if(bytes_read == 0){
             printf("Client disconnected before the complete HTTP header arrived.\n");
             break;
         }
@@ -62,12 +73,12 @@ void *handle_client(void *arg){
         total_bytes_read += (size_t) bytes_read;
         buffer[total_bytes_read] = '\0';
 
-        if (strstr(buffer, "\r\n\r\n") != NULL){
+        if(strstr(buffer, "\r\n\r\n") != NULL){
             headers_complete = 1;
         }
     }
 
-    if (buffer != NULL && headers_complete){
+    if(buffer != NULL && headers_complete){
         printf("----- Received %zu bytes -----\n%s\n-----------------------------\n",
                total_bytes_read, buffer);
 
@@ -80,19 +91,20 @@ void *handle_client(void *arg){
             "\r\n"
             "Hello, world!";
 
-        if (send(client_fd, response, strlen(response), 0) < 0){
+        if(send(client_fd, response, strlen(response), 0) < 0){
             perror("send failed");
         }
     }
 
     free(buffer);
     close(client_fd);
+    sem_post(&client_limit);
     printf("Connection closed. Waiting for the next client...\n");
     return NULL;
 }
 
 int main(int argc, char *argv[]){
-    if (argc != 2){
+    if(argc != 2){
         printf("Usage: %s <port>\n", argv[0]);
         exit(1);
     }
@@ -100,8 +112,14 @@ int main(int argc, char *argv[]){
 
     // 1. Create a socket -- this is just asking the OS for a "phone line" handle
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0){
+    if(server_fd < 0){
         perror("socket failed");
+        exit(1);
+    }
+
+    if(sem_init(&client_limit, 0, MAX_CONCURRENT_CLIENTS) < 0){
+        perror("sem_init failed");
+        close(server_fd);
         exit(1);
     }
 
@@ -116,13 +134,13 @@ int main(int argc, char *argv[]){
     address.sin_addr.s_addr = INADDR_ANY;  // accept on any local network interface
     address.sin_port = htons(port);        // htons = convert port into network byte order
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0){
+    if(bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0){
         perror("bind failed");
         exit(1);
     }
 
     // 3. Start listening -- 5 is how many pending connections can queue up
-    if (listen(server_fd, 5) < 0){
+    if(listen(server_fd, 5) < 0){
         perror("listen failed");
         exit(1);
     }
@@ -133,13 +151,13 @@ int main(int argc, char *argv[]){
     //    Each client is handled by its own detached thread.
     while (1){
         int client_fd = accept(server_fd, NULL, NULL);
-        if (client_fd < 0){
+        if(client_fd < 0){
             perror("accept failed");
             continue;
         }
 
         int *client_arg = malloc(sizeof(*client_arg));
-        if (client_arg == NULL){
+        if(client_arg == NULL){
             perror("malloc failed");
             close(client_fd);
             continue;
@@ -148,7 +166,7 @@ int main(int argc, char *argv[]){
 
         pthread_t tid;
         int thread_result = pthread_create(&tid, NULL, handle_client, client_arg);
-        if (thread_result != 0){
+        if(thread_result != 0){
             fprintf(stderr, "pthread_create failed: %s\n", strerror(thread_result));
             free(client_arg);
             close(client_fd);
