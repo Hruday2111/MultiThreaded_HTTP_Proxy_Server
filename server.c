@@ -6,10 +6,49 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <netdb.h>
 
 sem_t client_limit;
 // Maximum number of clients allowed to run concurrently.
 static const unsigned int MAX_CONCURRENT_CLIENTS = 3;
+
+struct request_target{
+    char host[256];
+    char path[2048];
+};
+
+int extract_request_target(const char *request, struct request_target *target){
+    char method[16];
+    char url[2048];
+    char version[16];
+    const char *host_header;
+    const char *url_path;
+
+    if(sscanf(request, "%15s %2047s %15s", method, url, version) != 3){
+        return -1;
+    }
+
+    if(strcmp(method, "GET") != 0 || strncmp(url, "http://", 7) != 0){
+        return -1;
+    }
+
+    url_path = strchr(url + 7, '/');
+    if(url_path == NULL){
+        strcpy(target->path, "/");
+    }else{
+        if(strlen(url_path) >= sizeof(target->path)){
+            return -1;
+        }
+        strcpy(target->path, url_path);
+    }
+
+    host_header = strstr(request, "Host:");
+    if(host_header == NULL || sscanf(host_header, "Host: %255[^\r\n]", target->host) != 1){
+        return -1;
+    }
+
+    return 0;
+}
 
 void *handle_client(void *arg){
     if(sem_wait(&client_limit) < 0){
@@ -81,17 +120,97 @@ void *handle_client(void *arg){
         printf("----- Received %zu bytes -----\n%s\n-----------------------------\n",
                total_bytes_read, buffer);
 
-        // Send back a fixed, hardcoded HTTP response.
-        const char *response =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 13\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "Hello, world!";
+        struct request_target target;
+        if(extract_request_target(buffer, &target) < 0){
+            printf("Unsupported request: expected GET http://host/path HTTP/1.1\n");
+        }else{
+            printf("Destination host: %s\n", target.host);
+            printf("Destination path: %s\n", target.path);
 
-        if(send(client_fd, response, strlen(response), 0) < 0){
-            perror("send failed");
+            struct hostent *server = gethostbyname(target.host);
+            int remote_fd = -1;
+
+            if(server == NULL){
+                herror("gethostbyname failed");
+            }else{
+                remote_fd = socket(AF_INET, SOCK_STREAM, 0);
+                if(remote_fd < 0){
+                    perror("remote socket failed");
+                }else{
+                    struct sockaddr_in remote_address;
+                    memset(&remote_address, 0, sizeof(remote_address));
+                    remote_address.sin_family = AF_INET;
+                    remote_address.sin_port = htons(80);
+                    memcpy(
+                        &remote_address.sin_addr.s_addr,
+                        server->h_addr,
+                        server->h_length
+                    );
+
+                    if(connect(
+                        remote_fd,
+                        (struct sockaddr *)&remote_address,
+                        sizeof(remote_address)
+                    ) < 0){
+                        perror("connect to remote server failed");
+                        close(remote_fd);
+                        remote_fd = -1;
+                    }else{
+                        printf("Connected to %s on port 80.\n", target.host);
+
+                        char remote_request[4096];
+                        int request_length = snprintf(
+                            remote_request,
+                            sizeof(remote_request),
+                            "GET %s HTTP/1.1\r\n"
+                            "Host: %s\r\n"
+                            "Connection: close\r\n"
+                            "\r\n",
+                            target.path,
+                            target.host
+                        );
+
+                        if(request_length < 0 || (size_t)request_length >= sizeof(remote_request)){
+                            fprintf(stderr, "Remote request is too large\n");
+                        }else if(send(
+                            remote_fd,
+                            remote_request,
+                            (size_t)request_length,
+                            0
+                        ) < 0){
+                            perror("send to remote server failed");
+                        }else{
+                            char relay_buf[4096];
+                            ssize_t bytes_read;
+
+                            while((bytes_read = recv(
+                                remote_fd,
+                                relay_buf,
+                                sizeof(relay_buf),
+                                0
+                            )) > 0){
+                                if(send(
+                                    client_fd,
+                                    relay_buf,
+                                    (size_t)bytes_read,
+                                    0
+                                ) < 0){
+                                    perror("send to client failed");
+                                    break;
+                                }
+                            }
+
+                            if(bytes_read < 0){
+                                perror("recv from remote server failed");
+                            }
+                        }
+                    }
+                }
+            }
+
+            if(remote_fd >= 0){
+                close(remote_fd);
+            }
         }
     }
     sleep(5);
