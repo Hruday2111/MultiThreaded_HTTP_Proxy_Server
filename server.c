@@ -21,7 +21,6 @@ void *handle_client(void *arg){
     free(arg);
 
     printf("Client connected!\n");
-    sleep(5);
 
     // Read the request in chunks until the complete HTTP header arrives.
     // One recv() call is not guaranteed to contain the complete request.
@@ -95,7 +94,7 @@ void *handle_client(void *arg){
             perror("send failed");
         }
     }
-
+    sleep(5);
     free(buffer);
     close(client_fd);
     sem_post(&client_limit);
