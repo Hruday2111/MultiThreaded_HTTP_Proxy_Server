@@ -65,7 +65,7 @@ int fetch_remote_response(
     }
 
     printf(
-        "[remote client fd=%d remote fd=%d] connected to host=%s port=80\n",
+        "[remote %d -> %d] connected host=%s port=80\n",
         client_fd,
         remote_fd,
         host
@@ -155,7 +155,7 @@ int fetch_remote_response(
     }
 
     printf(
-        "[relay client fd=%d remote fd=%d] relayed %zu bytes\n",
+        "[relay %d -> %d] bytes=%zu\n",
         client_fd,
         remote_fd,
         total_bytes_relayed

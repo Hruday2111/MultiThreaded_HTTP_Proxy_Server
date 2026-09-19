@@ -41,8 +41,6 @@ void *handle_client(void *arg){
     int client_fd = *(int *)arg;
     free(arg);
 
-    printf("[client fd=%d] worker started\n", client_fd);
-
     // Read the request in chunks until the complete HTTP header arrives.
     // One recv() call is not guaranteed to contain the complete request.
     size_t buffer_capacity = 4096;
@@ -99,22 +97,19 @@ void *handle_client(void *arg){
     }
 
     if(buffer != NULL && headers_complete){
-        printf("[client fd=%d] request received (%zu bytes)\n",
+        printf("[client fd=%d] request received: %zu bytes\n",
                client_fd, total_bytes_read);
-        printf("[client fd=%d] ----- request begin -----\n%s",
-               client_fd, buffer);
-        printf("[client fd=%d] ----- request end -----\n", client_fd);
 
         struct request_target target;
         if(extract_request_target(buffer, &target) < 0){
             printf(
-                "[parser fd=%d] unsupported request; only GET http://host/path is supported\n",
+                "[client fd=%d] unsupported request; only GET http://host/path is supported\n",
                 client_fd
             );
             send_unsupported_response(client_fd);
         }else{
             printf(
-                "[parser fd=%d] destination host=%s path=%s\n",
+                "[request fd=%d] host=%s path=%s\n",
                 client_fd,
                 target.host,
                 target.path
@@ -137,7 +132,7 @@ void *handle_client(void *arg){
 
                 if(cache_get(cache_key, &cached_data, &cached_size)){
                     printf(
-                        "[cache fd=%d] hit key=%s size=%zu; serving cached response\n",
+                        "[cache fd=%d] HIT key=%s bytes=%zu\n",
                         client_fd,
                         cache_key,
                         cached_size
@@ -147,7 +142,7 @@ void *handle_client(void *arg){
                     }
                     free(cached_data);
                 }else{
-                    printf("[cache fd=%d] miss key=%s\n", client_fd, cache_key);
+                    printf("[cache fd=%d] MISS key=%s\n", client_fd, cache_key);
 
                     char *response_data = NULL;
                     size_t response_size = 0;
@@ -162,7 +157,7 @@ void *handle_client(void *arg){
                     }else{
                         cache_put(cache_key, response_data, response_size);
                         printf(
-                            "[cache fd=%d] stored key=%s size=%zu\n",
+                            "[cache fd=%d] STORED key=%s bytes=%zu\n",
                             client_fd,
                             cache_key,
                             response_size
@@ -181,6 +176,6 @@ void *handle_client(void *arg){
     free(buffer);
     close(client_fd);
     sem_post(&client_limit);
-    printf("[client fd=%d] connection closed; worker finished\n", client_fd);
+    printf("[client fd=%d] done\n", client_fd);
     return NULL;
 }

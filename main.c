@@ -57,7 +57,7 @@ int main(int argc, char *argv[]){
         exit(1);
     }
 
-    printf("[main] listening on port %d\n", port);
+    printf("[main] listening on port %d\n\n", port);
 
     // Accept clients forever and hand each one to a detached worker thread.
     while(1){
@@ -67,7 +67,7 @@ int main(int argc, char *argv[]){
             continue;
         }
 
-        printf("[main] accepted client fd=%d; starting worker\n", client_fd);
+        printf("\n[main] accepted client fd=%d -> worker\n", client_fd);
 
         // pthread_create receives one void* argument, so allocate the fd and
         // let handle_client copy and free it inside the worker thread.

@@ -2,12 +2,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
+#include <new>
+#include <pthread.h>
 #include <string>
 #include <unordered_map>
 
-using std::lock_guard;
-using std::mutex;
 using std::size_t;
 using std::string;
 using std::unordered_map;
@@ -35,32 +34,70 @@ struct node{
 class LRUCache{
 public:
     explicit LRUCache(size_t capacity)
-        : max_bytes(capacity), current_bytes(0), head(nullptr), tail(nullptr) {}
+        : max_bytes(capacity), current_bytes(0), head(nullptr), tail(nullptr){
+        pthread_rwlockattr_t attributes;
+        if(pthread_rwlockattr_init(&attributes) != 0){
+            std::abort();
+        }
+
+        if(pthread_rwlockattr_setkind_np(
+            &attributes,
+            PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+        ) != 0){
+            pthread_rwlockattr_destroy(&attributes);
+            std::abort();
+        }
+
+        if(pthread_rwlock_init(&cache_lock, &attributes) != 0){
+            pthread_rwlockattr_destroy(&attributes);
+            std::abort();
+        }
+
+        pthread_rwlockattr_destroy(&attributes);
+    }
 
     ~LRUCache(){
         clear();
+        pthread_rwlock_destroy(&cache_lock);
     }
 
-    // Return true and copy the response into out_response when the key exists.
+    // The response bytes are copied under a read lock. LRU promotion is a
+    // separate write-locked step because it changes the linked-list order.
     bool get(const string &key, CachedResponse &out_response){
-        lock_guard<mutex> lock(cache_mutex);
-
-        auto found = entries.find(key);
-        if(found == entries.end()){
+        if(pthread_rwlock_rdlock(&cache_lock) != 0){
             return false;
         }
 
-        node *entry = found->second;
-        move_to_tail(entry);
-        out_response = entry->val;
+        auto found = entries.find(key);
+        if(found == entries.end()){
+            pthread_rwlock_unlock(&cache_lock);
+            return false;
+        }
+
+        out_response = found->second->val;
+        pthread_rwlock_unlock(&cache_lock);
+
+        // Re-check the key after reacquiring the write lock. The entry may
+        // have been evicted by another thread while the read lock was free.
+        if(pthread_rwlock_wrlock(&cache_lock) == 0){
+            found = entries.find(key);
+            if(found != entries.end()){
+                move_to_tail(found->second);
+            }
+            pthread_rwlock_unlock(&cache_lock);
+        }
+
         return true;
     }
 
     void put(const string &key, const CachedResponse &value){
-        lock_guard<mutex> lock(cache_mutex);
+        if(pthread_rwlock_wrlock(&cache_lock) != 0){
+            return;
+        }
 
         // A response larger than the entire cache can never fit.
         if(value.size > max_bytes){
+            pthread_rwlock_unlock(&cache_lock);
             return;
         }
 
@@ -76,15 +113,24 @@ public:
             remove_node(head);
         }
 
-        node *entry = new node(value, key);
+        node *entry = new(std::nothrow) node(value, key);
+        if(entry == nullptr){
+            pthread_rwlock_unlock(&cache_lock);
+            return;
+        }
         entries[key] = entry;
         append_to_tail(entry);
         current_bytes += value.size;
+        pthread_rwlock_unlock(&cache_lock);
     }
 
     size_t bytes_used() const{
-        lock_guard<mutex> lock(cache_mutex);
-        return current_bytes;
+        if(pthread_rwlock_rdlock(&cache_lock) != 0){
+            return 0;
+        }
+        size_t result = current_bytes;
+        pthread_rwlock_unlock(&cache_lock);
+        return result;
     }
 
 private:
@@ -93,7 +139,7 @@ private:
     unordered_map<string, node *> entries;
     node *head;
     node *tail;
-    mutable mutex cache_mutex;
+    mutable pthread_rwlock_t cache_lock;
 
     void append_to_tail(node *entry){
         entry->prev = tail;
