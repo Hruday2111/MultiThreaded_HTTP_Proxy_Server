@@ -1,5 +1,6 @@
 #include "remote_fetch.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -8,7 +9,16 @@
 
 // Connect to the destination web server, send one request, and relay its
 // response directly to the original client connection.
-int fetch_remote_response(const char *host, const char *path, int client_fd){
+int fetch_remote_response(
+    const char *host,
+    const char *path,
+    int client_fd,
+    char **response_data,
+    size_t *response_size
+){
+    *response_data = NULL;
+    *response_size = 0;
+
     // Resolve the hostname into an IP address using DNS.
     struct hostent *server = gethostbyname(host);
     int remote_fd = -1;
@@ -98,6 +108,24 @@ int fetch_remote_response(const char *host, const char *path, int client_fd){
     ssize_t bytes_read;
     size_t total_bytes_relayed = 0;
     while((bytes_read = recv(remote_fd, relay_buf, sizeof(relay_buf), 0)) > 0){
+        char *larger_response = (char *)realloc(
+            *response_data,
+            total_bytes_relayed + (size_t)bytes_read
+        );
+        if(larger_response == NULL){
+            fprintf(stderr, "[remote client fd=%d] response buffer allocation failed\n", client_fd);
+            free(*response_data);
+            *response_data = NULL;
+            close(remote_fd);
+            return -1;
+        }
+        *response_data = larger_response;
+        memcpy(
+            *response_data + total_bytes_relayed,
+            relay_buf,
+            (size_t)bytes_read
+        );
+
         if(send(client_fd, relay_buf, (size_t)bytes_read, 0) < 0){
             fprintf(
                 stderr,
@@ -105,6 +133,8 @@ int fetch_remote_response(const char *host, const char *path, int client_fd){
                 client_fd,
                 remote_fd
             );
+            free(*response_data);
+            *response_data = NULL;
             close(remote_fd);
             return -1;
         }
@@ -118,6 +148,8 @@ int fetch_remote_response(const char *host, const char *path, int client_fd){
             client_fd,
             remote_fd
         );
+        free(*response_data);
+        *response_data = NULL;
         close(remote_fd);
         return -1;
     }
@@ -128,6 +160,7 @@ int fetch_remote_response(const char *host, const char *path, int client_fd){
         remote_fd,
         total_bytes_relayed
     );
+    *response_size = total_bytes_relayed;
     close(remote_fd);
     return 0;
 }

@@ -1,4 +1,5 @@
 #include "client_handler.h"
+#include "cache.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 
 // Maximum number of clients allowed to run concurrently.
 static const unsigned int MAX_CONCURRENT_CLIENTS = 3;
+static const size_t MAX_CACHE_BYTES = 200 * 1024 * 1024;
 
 int main(int argc, char *argv[]){
     if(argc != 2){
@@ -29,6 +31,9 @@ int main(int argc, char *argv[]){
         close(server_fd);
         exit(1);
     }
+
+    cache_init(MAX_CACHE_BYTES);
+    printf("[main] cache initialized with %zu bytes\n", MAX_CACHE_BYTES);
 
     // Lets us restart the server quickly without "port already in use" errors.
     int opt = 1;

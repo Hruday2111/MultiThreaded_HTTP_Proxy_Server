@@ -1,4 +1,5 @@
 #include "client_handler.h"
+#include "cache.h"
 #include "http_parser.h"
 #include "remote_fetch.h"
 #include <stdio.h>
@@ -118,10 +119,57 @@ void *handle_client(void *arg){
                 target.host,
                 target.path
             );
-            if(fetch_remote_response(target.host, target.path, client_fd) < 0){
-                printf("[client fd=%d] remote fetch failed\n", client_fd);
+
+            char cache_key[4096];
+            int key_length = snprintf(
+                cache_key,
+                sizeof(cache_key),
+                "http://%s%s",
+                target.host,
+                target.path
+            );
+
+            if(key_length < 0 || (size_t)key_length >= sizeof(cache_key)){
+                printf("[cache fd=%d] request key is too large; skipping cache\n", client_fd);
             }else{
-                printf("[client fd=%d] remote response relayed successfully\n", client_fd);
+                char *cached_data = NULL;
+                size_t cached_size = 0;
+
+                if(cache_get(cache_key, &cached_data, &cached_size)){
+                    printf(
+                        "[cache fd=%d] hit key=%s size=%zu; serving cached response\n",
+                        client_fd,
+                        cache_key,
+                        cached_size
+                    );
+                    if(send(client_fd, cached_data, cached_size, 0) < 0){
+                        fprintf(stderr, "[cache fd=%d] failed to send cached response\n", client_fd);
+                    }
+                    free(cached_data);
+                }else{
+                    printf("[cache fd=%d] miss key=%s\n", client_fd, cache_key);
+
+                    char *response_data = NULL;
+                    size_t response_size = 0;
+                    if(fetch_remote_response(
+                        target.host,
+                        target.path,
+                        client_fd,
+                        &response_data,
+                        &response_size
+                    ) < 0){
+                        printf("[client fd=%d] remote fetch failed\n", client_fd);
+                    }else{
+                        cache_put(cache_key, response_data, response_size);
+                        printf(
+                            "[cache fd=%d] stored key=%s size=%zu\n",
+                            client_fd,
+                            cache_key,
+                            response_size
+                        );
+                        free(response_data);
+                    }
+                }
             }
         }
     }
