@@ -12,11 +12,14 @@ sem_t client_limit;
 // Maximum number of clients allowed to run concurrently.
 static const unsigned int MAX_CONCURRENT_CLIENTS = 3;
 
+// The small subset of the request destination that this proxy currently needs.
 struct request_target{
     char host[256];
     char path[2048];
 };
 
+// Extract an absolute HTTP URL and the Host header from the raw client request.
+// This is intentionally simple for now; a complete proxy parser will replace it.
 int extract_request_target(const char *request, struct request_target *target){
     char method[16];
     char url[2048];
@@ -28,10 +31,12 @@ int extract_request_target(const char *request, struct request_target *target){
         return -1;
     }
 
+    // Only support GET requests using the absolute URL form expected by proxies.
     if(strcmp(method, "GET") != 0 || strncmp(url, "http://", 7) != 0){
         return -1;
     }
 
+    // The path begins at the first slash after "http://hostname".
     url_path = strchr(url + 7, '/');
     if(url_path == NULL){
         strcpy(target->path, "/");
@@ -42,6 +47,7 @@ int extract_request_target(const char *request, struct request_target *target){
         strcpy(target->path, url_path);
     }
 
+    // Find the hostname that the client supplied in its Host header.
     host_header = strstr(request, "Host:");
     if(host_header == NULL || sscanf(host_header, "Host: %255[^\r\n]", target->host) != 1){
         return -1;
@@ -50,12 +56,28 @@ int extract_request_target(const char *request, struct request_target *target){
     return 0;
 }
 
+// Send a real HTTP error instead of leaving an unsupported client hanging.
+void send_unsupported_response(int client_fd){
+    const char *response =
+        "HTTP/1.1 501 Not Implemented\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+
+    if(send(client_fd, response, strlen(response), 0) < 0){
+        perror("send error response failed");
+    }
+}
+
 void *handle_client(void *arg){
+    // A thread may exist while waiting, but only a limited number may actively
+    // handle clients at the same time.
     if(sem_wait(&client_limit) < 0){
         perror("sem_wait failed");
         return NULL;
     }
 
+    // The main thread allocated this integer for pthread_create().
     int client_fd = *(int *)arg;
     free(arg);
 
@@ -123,20 +145,25 @@ void *handle_client(void *arg){
         struct request_target target;
         if(extract_request_target(buffer, &target) < 0){
             printf("Unsupported request: expected GET http://host/path HTTP/1.1\n");
+            send_unsupported_response(client_fd);
         }else{
             printf("Destination host: %s\n", target.host);
             printf("Destination path: %s\n", target.path);
 
+            // Resolve the hostname into an IP address using DNS.
             struct hostent *server = gethostbyname(target.host);
             int remote_fd = -1;
 
             if(server == NULL){
                 herror("gethostbyname failed");
             }else{
+                // This socket is separate from client_fd: it connects outward
+                // from the proxy to the destination web server.
                 remote_fd = socket(AF_INET, SOCK_STREAM, 0);
                 if(remote_fd < 0){
                     perror("remote socket failed");
                 }else{
+                    // Build the destination address: IPv4, resolved IP, port 80.
                     struct sockaddr_in remote_address;
                     memset(&remote_address, 0, sizeof(remote_address));
                     remote_address.sin_family = AF_INET;
@@ -147,6 +174,7 @@ void *handle_client(void *arg){
                         server->h_length
                     );
 
+                    // Unlike the listening socket, this socket only needs connect().
                     if(connect(
                         remote_fd,
                         (struct sockaddr *)&remote_address,
@@ -158,6 +186,8 @@ void *handle_client(void *arg){
                     }else{
                         printf("Connected to %s on port 80.\n", target.host);
 
+                        // Convert the client's proxy-style absolute URL into the
+                        // origin-form request expected by the destination server.
                         char remote_request[4096];
                         int request_length = snprintf(
                             remote_request,
@@ -180,6 +210,8 @@ void *handle_client(void *arg){
                         ) < 0){
                             perror("send to remote server failed");
                         }else{
+                            // Relay each response chunk immediately instead of
+                            // buffering the entire response in memory.
                             char relay_buf[4096];
                             ssize_t bytes_read;
 
@@ -214,6 +246,7 @@ void *handle_client(void *arg){
         }
     }
     sleep(5);
+    // Return the semaphore token before this detached thread exits.
     free(buffer);
     close(client_fd);
     sem_post(&client_limit);
