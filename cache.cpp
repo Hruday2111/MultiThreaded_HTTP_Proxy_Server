@@ -1,3 +1,8 @@
+/*
+ * Responsibility: provide a thread-safe byte-capacity LRU cache and expose a
+ * small C ABI so the C proxy modules can use the C++ implementation.
+ */
+
 #include "cache.h"
 #include <cstddef>
 #include <cstdlib>
@@ -33,6 +38,7 @@ struct node{
 
 class LRUCache{
 public:
+    // Configure writer preference once so sustained cache hits cannot starve puts.
     explicit LRUCache(size_t capacity)
         : max_bytes(capacity), current_bytes(0), head(nullptr), tail(nullptr){
         pthread_rwlockattr_t attributes;
@@ -56,6 +62,7 @@ public:
         pthread_rwlockattr_destroy(&attributes);
     }
 
+    // Release every linked-list node and destroy the rwlock owned by the cache.
     ~LRUCache(){
         clear();
         pthread_rwlock_destroy(&cache_lock);
@@ -90,6 +97,8 @@ public:
         return true;
     }
 
+    // Insert or replace a response, evicting least-recently-used entries until
+    // the byte budget fits; oversized responses are rejected outright.
     void put(const string &key, const CachedResponse &value){
         if(pthread_rwlock_wrlock(&cache_lock) != 0){
             return;
@@ -124,6 +133,7 @@ public:
         pthread_rwlock_unlock(&cache_lock);
     }
 
+    // Expose current usage for diagnostics without allowing writes concurrently.
     size_t bytes_used() const{
         if(pthread_rwlock_rdlock(&cache_lock) != 0){
             return 0;
@@ -205,11 +215,13 @@ static LRUCache *g_cache = nullptr;
 
 extern "C" {
 
+// Create the process-wide cache used by the C proxy modules.
 void cache_init(size_t max_bytes){
     delete g_cache;
     g_cache = new LRUCache(max_bytes);
 }
 
+// Return a malloc-owned copy so C callers can use cached bytes after unlocking.
 int cache_get(const char *key, char **out_data, size_t *out_size){
     if(g_cache == nullptr || key == nullptr || out_data == nullptr || out_size == nullptr){
         return 0;
@@ -235,6 +247,7 @@ int cache_get(const char *key, char **out_data, size_t *out_size){
     return 1;
 }
 
+// Copy a response into the LRU cache; the caller retains ownership of data.
 void cache_put(const char *key, const char *data, size_t size){
     if(g_cache == nullptr || key == nullptr || (data == nullptr && size > 0)){
         return;
@@ -243,6 +256,7 @@ void cache_put(const char *key, const char *data, size_t size){
     g_cache->put(string(key), CachedResponse(data, size));
 }
 
+// Release the process-wide cache during orderly shutdown or tests.
 void cache_destroy(void){
     delete g_cache;
     g_cache = nullptr;

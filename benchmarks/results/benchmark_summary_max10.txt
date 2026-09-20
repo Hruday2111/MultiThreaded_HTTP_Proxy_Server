@@ -1,0 +1,16 @@
+Benchmark summary (MAX_CONCURRENT_CLIENTS=10)
+
+Protocol:
+- 100 URLs
+- 3 passes
+- 1 miss + 10 hits per URL/pass
+- 5-second timeout
+- 3,300 planned trials
+
+Results:
+- Misses: 292 successful, 8 failures
+- Hits: 2,920 successful, 0 failures, 80 skipped after failed misses
+- Miss median: 168.061 ms
+- Hit median: 0.484 ms
+- Median speedup: approximately 347x
+- Overall failure rate: 0.24%

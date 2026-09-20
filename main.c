@@ -1,3 +1,8 @@
+/*
+ * Responsibility: create the listening socket, initialize shared services,
+ * and accept client connections into detached worker threads.
+ */
+
 #include "client_handler.h"
 #include "cache.h"
 #include <stdio.h>
@@ -7,17 +12,23 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 
 // Maximum number of clients allowed to run concurrently.
-static const unsigned int MAX_CONCURRENT_CLIENTS = 3;
+static const unsigned int MAX_CONCURRENT_CLIENTS = 10;
 static const size_t MAX_CACHE_BYTES = 200 * 1024 * 1024;
 
+// Validate the port, initialize the proxy, and run the accept loop forever.
 int main(int argc, char *argv[]){
     if(argc != 2){
         printf("Usage: %s <port>\n", argv[0]);
         exit(1);
     }
     int port = atoi(argv[1]);
+
+    // A timed-out client may close its socket while a worker is relaying.
+    // Ignore SIGPIPE so send() reports an error instead of killing the proxy.
+    signal(SIGPIPE, SIG_IGN);
 
     // Create the listening socket that accepts connections from browsers.
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);

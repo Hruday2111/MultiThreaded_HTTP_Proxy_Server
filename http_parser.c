@@ -1,3 +1,8 @@
+/*
+ * Responsibility: parse the small HTTP request subset supported by the proxy.
+ * This module only handles strings and never touches sockets.
+ */
+
 #include "http_parser.h"
 #include <stdio.h>
 #include <string.h>
@@ -15,6 +20,8 @@ int extract_request_target(const char *request, struct request_target *target){
         return -1;
     }
 
+    // NOTE: CONNECT/HTTPS tunneling is intentionally unsupported; this proxy
+    // currently handles only plain HTTP GET requests on port 80.
     // Only support GET requests using the absolute URL form expected by proxies.
     if(strcmp(method, "GET") != 0 || strncmp(url, "http://", 7) != 0){
         return -1;

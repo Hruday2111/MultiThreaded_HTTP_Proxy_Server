@@ -1,14 +1,21 @@
+/*
+ * Responsibility: resolve an HTTP destination, fetch its response, relay the
+ * bytes to the client, and return a copy that the cache can store.
+ */
+
 #include "remote_fetch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netdb.h>
 
 // Connect to the destination web server, send one request, and relay its
 // response directly to the original client connection.
+// The response is also accumulated so a successful miss can populate the cache.
 int fetch_remote_response(
     const char *host,
     const char *path,
@@ -35,6 +42,19 @@ int fetch_remote_response(
         fprintf(stderr, "[remote client fd=%d] could not create remote socket\n", client_fd);
         return -1;
     }
+
+    // Bound the remote read so one unresponsive origin cannot hold a worker
+    // semaphore slot forever and poison later benchmark requests.
+    struct timeval remote_timeout;
+    remote_timeout.tv_sec = 5;
+    remote_timeout.tv_usec = 0;
+    setsockopt(
+        remote_fd,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        &remote_timeout,
+        sizeof(remote_timeout)
+    );
 
     // Build the destination address: IPv4, resolved IP, and port 80.
     struct sockaddr_in remote_address;

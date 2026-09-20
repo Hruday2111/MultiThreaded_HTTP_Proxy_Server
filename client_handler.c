@@ -1,3 +1,8 @@
+/*
+ * Responsibility: own the per-client lifecycle, including request buffering,
+ * cache lookup, remote fetching, error responses, and semaphore accounting.
+ */
+
 #include "client_handler.h"
 #include "cache.h"
 #include "http_parser.h"
@@ -29,6 +34,7 @@ void send_unsupported_response(int client_fd){
     }
 }
 
+// Read one complete request, serve a cache hit, or coordinate a remote fetch.
 void *handle_client(void *arg){
     // A thread may exist while waiting, but only a limited number may actively
     // handle clients at the same time.
@@ -116,6 +122,8 @@ void *handle_client(void *arg){
             );
 
             char cache_key[4096];
+            // NOTE: query parameters are part of the key, so cache-busting
+            // parameters correctly produce distinct, uncacheable entries.
             int key_length = snprintf(
                 cache_key,
                 sizeof(cache_key),
@@ -130,6 +138,8 @@ void *handle_client(void *arg){
                 char *cached_data = NULL;
                 size_t cached_size = 0;
 
+                // NOTE: concurrent misses for the same key are not coalesced;
+                // cache-stampede protection is a future improvement.
                 if(cache_get(cache_key, &cached_data, &cached_size)){
                     printf(
                         "[cache fd=%d] HIT key=%s bytes=%zu\n",
@@ -168,9 +178,6 @@ void *handle_client(void *arg){
             }
         }
     }
-
-    // Keep the test delay so the semaphore limit remains easy to observe.
-    sleep(5);
 
     // Return the semaphore token before this detached thread exits.
     free(buffer);

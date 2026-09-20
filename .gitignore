@@ -1,2 +1,8 @@
 proxy
+step*_server
+cache_test
+cache_rwlock_test
 *.o
+__pycache__/
+*.pyc
+benchmarks/results/*.csv
